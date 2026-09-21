@@ -106,6 +106,61 @@ export class PaperPerpsService {
       }
     }
   }
+  async hydrateFromDb(): Promise<void> {
+    if (!this.db) return;
+    try {
+      const openPositions = await this.db.getOpenPositions();
+      for (const p of openPositions) {
+        this.positions.set(p.market, {
+          market: p.market,
+          side: p.side,
+          sizeUsd: p.size_usd,
+          leverage: p.leverage,
+          entryPrice: p.entry_price,
+          markPrice: p.mark_price,
+          initialMarginUsd: p.initial_margin_usd,
+          unrealizedPnl: p.unrealized_pnl,
+          liquidationPrice: p.liquidation_price,
+          ...(p.stop_loss_price ? { stopLossPrice: p.stop_loss_price } : {}),
+          ...(p.take_profit_price ? { takeProfitPrice: p.take_profit_price } : {}),
+          ...(p.trailing_stop_percent ? { trailingStopPercent: p.trailing_stop_percent } : {}),
+          openedAt: p.opened_at ?? new Date(this.now()).toISOString(),
+          lastUpdated: p.last_updated ?? new Date(this.now()).toISOString(),
+        });
+      }
+      const recentOrders = await this.db.getRecentOrders();
+      for (const o of recentOrders) {
+        this.orders.set(o.id, {
+          id: o.id,
+          market: o.market,
+          side: o.side,
+          sizeUsd: o.size_usd,
+          leverage: o.leverage,
+          orderType: o.order_type,
+          status: o.status as any,
+          reduceOnly: Boolean(o.close_reason),
+          fillPrice: o.fill_price ?? null,
+          ...(o.stop_loss_price ? { stopLossPrice: o.stop_loss_price } : {}),
+          ...(o.take_profit_price ? { takeProfitPrice: o.take_profit_price } : {}),
+          ...(o.trailing_stop_percent ? { trailingStopPercent: o.trailing_stop_percent } : {}),
+          closeReason: (o.close_reason as any) ?? null,
+          createdAt: o.created_at ?? new Date(this.now()).toISOString(),
+          updatedAt: o.created_at ?? new Date(this.now()).toISOString(),
+        });
+      }
+    } catch (err) {
+      console.warn("PaperPerpsService: error hydrating from DB", err);
+    }
+  }
+
+  async ensureFreshMarks(): Promise<void> {
+    if (this.config.NODE_ENV === "test") return;
+    const age = this.feedLastUpdated === null ? Infinity : this.now() - this.feedLastUpdated;
+    if (age > this.config.PERPS_MARK_POLL_MS) {
+      await this.refreshMarks();
+    }
+  }
+
   start() { if (!this.pollTimer) { void this.refreshMarks(); this.pollTimer = setInterval(() => void this.refreshMarks(), this.config.PERPS_MARK_POLL_MS); this.pollTimer.unref(); } }
   stop() { if (this.pollTimer) clearInterval(this.pollTimer); this.pollTimer = undefined; }
   async refreshMarks() { if (this.refreshInFlight) return this.refreshInFlight; this.refreshInFlight = this.fetchMarks().finally(() => { this.refreshInFlight = undefined; }); return this.refreshInFlight; }

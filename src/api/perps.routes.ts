@@ -14,9 +14,16 @@ export function registerPerpsRoutes(app: FastifyInstance, deps: AppDependencies)
     const q = z.object({ symbol: z.string().default("BTCUSD"), timeframe: z.string().default("LIVE") }).parse(request.query);
     return fetchMarketInsight(q.symbol, q.timeframe, String(deps.config.PERPS_MAX_LEVERAGE));
   });
-  app.get("/api/perps/markets", async () => ({ mode: perps.mode, source: perps.dataSource, feed: perps.getFeedStatus(), disclaimer: "PancakeSwap Perps V2 trading console with live reference prices.", markets: perps.listMarkets() }));
-  app.get("/api/perps/ticker", async () => perps.getTicker());
+  app.get("/api/perps/markets", async () => {
+    await perps.ensureFreshMarks();
+    return { mode: perps.mode, source: perps.dataSource, feed: perps.getFeedStatus(), disclaimer: "PancakeSwap Perps V2 trading console with live reference prices.", markets: perps.listMarkets() };
+  });
+  app.get("/api/perps/ticker", async () => {
+    await perps.ensureFreshMarks();
+    return perps.getTicker();
+  });
   app.get("/api/perps/account", async () => {
+    await perps.ensureFreshMarks();
     const account = perps.getAccount();
     if (deps.balances && deps.walletAddress) {
       try {
@@ -28,12 +35,16 @@ export function registerPerpsRoutes(app: FastifyInstance, deps: AppDependencies)
     }
     return account;
   });
-  app.get("/api/perps/positions", async () => ({ positions: perps.listPositions() }));
+  app.get("/api/perps/positions", async () => {
+    await perps.ensureFreshMarks();
+    return { positions: perps.listPositions() };
+  });
   app.get("/api/perps/orders", async () => ({ orders: perps.listOrders() }));
   app.get("/api/perps/safety", async () => ({ safety: perps.getSafetyState() }));
   app.put("/api/perps/safety/kill-switch", async (request) => { const body = z.object({ enabled: z.boolean(), reason: z.string().max(200).optional() }).parse(request.body); return { safety: perps.setKillSwitch(body.enabled, body.reason) }; });
   app.post("/api/perps/emergency-close", async (request) => perps.emergencyCloseAll(z.object({ reason: z.string().max(200).default("operator emergency close") }).parse(request.body ?? {}).reason));
   app.post("/api/perps/orders/preview", async (request) => {
+    await perps.ensureFreshMarks();
     const parsed = orderSchema.parse(request.body);
     if (parsed.isLive && !deps.config.ENABLE_LIVE_PERPS) {
       throw new AppError("Live execution is disabled. Set ENABLE_LIVE_PERPS=true and provide a wallet PRIVATE_KEY in .env to trade on-chain.", "LIVE_PERPS_DISABLED", 403);
@@ -41,6 +52,7 @@ export function registerPerpsRoutes(app: FastifyInstance, deps: AppDependencies)
     return { preview: perps.preview(parsed) };
   });
   app.post("/api/perps/orders", async (request) => {
+    await perps.ensureFreshMarks();
     const body = orderSchema.extend({ confirmationToken: z.string().uuid() }).parse(request.body);
     if (body.isLive && !deps.config.ENABLE_LIVE_PERPS) {
       throw new AppError("Live execution is disabled. Set ENABLE_LIVE_PERPS=true and provide a wallet PRIVATE_KEY in .env to trade on-chain.", "LIVE_PERPS_DISABLED", 403);
