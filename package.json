@@ -1,0 +1,45 @@
+{
+  "name": "pancakeswap-trader-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx --env-file-if-exists=.env watch src/server.ts",
+    "start": "node --env-file-if-exists=.env dist/src/server.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:integration": "RUN_INTEGRATION_TESTS=true vitest run tests/integration",
+    "quote:test": "tsx scripts/quote-test.ts",
+    "balance:test": "tsx scripts/balance-test.ts",
+    "round-trip": "tsx scripts/round-trip-test.ts",
+    "trade:test": "tsx scripts/execute-test-trade.ts"
+  },
+  "dependencies": {
+    "@pancakeswap/chains": "0.9.0",
+    "@pancakeswap/sdk": "5.9.1",
+    "@pancakeswap/smart-router": "7.7.0",
+    "@pancakeswap/swap-sdk-core": "1.6.0",
+    "@pancakeswap/tokens": "0.9.0",
+    "@supabase/supabase-js": "^2.116.0",
+    "fastify": "^5.2.1",
+    "pino": "^9.6.0",
+    "viem": "2.37.13",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  },
+  "overrides": {
+    "@pancakeswap/infinity-stable-sdk": "1.0.1",
+    "bn.js": "5.2.3",
+    "uuid": "11.1.1",
+    "ws": "8.21.0"
+  }
+}
