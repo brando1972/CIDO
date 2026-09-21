@@ -1,4 +1,5 @@
 import pg from "pg";
+import { randomUUID } from "node:crypto";
 import type { StoredOrder, StoredPosition } from "./supabase.js";
 
 const { Pool } = pg;
@@ -19,14 +20,20 @@ let poolInstance: pg.Pool | null = null;
 export function getPostgresPool(connectionString?: string): pg.Pool | null {
   if (poolInstance) return poolInstance;
 
-  const url = connectionString || process.env.DATABASE_URL;
-  if (!url) return null;
+  const rawUrl = connectionString || process.env.DATABASE_URL;
+  if (!rawUrl) return null;
+
+  // Supabase pooler on 5432 is session mode (15 max total connections).
+  // Transaction mode on port 6543 supports hundreds of serverless connections.
+  const url = rawUrl.includes("pooler.supabase.com:5432")
+    ? rawUrl.replace("pooler.supabase.com:5432", "pooler.supabase.com:6543")
+    : rawUrl;
 
   poolInstance = new Pool({
     connectionString: url,
     ssl: { rejectUnauthorized: false },
-    max: 10,
-    idleTimeoutMillis: 30000,
+    max: 2,
+    idleTimeoutMillis: 5000,
     connectionTimeoutMillis: 5000,
   });
 
@@ -133,7 +140,18 @@ export class CidoDatabaseRepository {
   async savePosition(pos: StoredPosition): Promise<void> {
     if (!this.pool) return;
     try {
-      const id = pos.id || (await import("node:crypto")).randomUUID();
+      let id = pos.id;
+      if (!id) {
+        const existing = await this.pool.query<{ id: string }>(
+          "SELECT id FROM cido_positions WHERE market = $1 AND status = 'open' LIMIT 1",
+          [pos.market]
+        );
+        if (existing.rows[0]?.id) {
+          id = existing.rows[0].id;
+        } else {
+          id = randomUUID();
+        }
+      }
       await this.pool.query(
         `INSERT INTO cido_positions (
           id, user_id, market, side, size_usd, leverage, entry_price, mark_price,
@@ -141,6 +159,7 @@ export class CidoDatabaseRepository {
           take_profit_price, trailing_stop_percent, is_live, status, opened_at, last_updated
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW(), NOW())
         ON CONFLICT (id) DO UPDATE SET
+          size_usd = EXCLUDED.size_usd,
           mark_price = EXCLUDED.mark_price,
           unrealized_pnl = EXCLUDED.unrealized_pnl,
           stop_loss_price = EXCLUDED.stop_loss_price,

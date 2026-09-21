@@ -59,6 +59,50 @@ export class PaperPerpsService {
       if (Array.isArray(raw.positions)) { for (const p of raw.positions) this.positions.set(p.market, p); }
     } catch { /* ignore corrupted state */ }
   }
+  async saveDbState(): Promise<void> {
+    if (!this.db) return;
+    const promises: Promise<unknown>[] = [];
+    for (const o of this.orders.values()) {
+      promises.push(this.db.saveOrder({
+        id: o.id,
+        market: o.market,
+        side: o.side,
+        size_usd: o.sizeUsd,
+        leverage: o.leverage,
+        order_type: o.orderType,
+        status: o.status,
+        fill_price: o.fillPrice ?? null,
+        stop_loss_price: o.stopLossPrice ?? null,
+        take_profit_price: o.takeProfitPrice ?? null,
+        trailing_stop_percent: o.trailingStopPercent ?? null,
+        is_live: false,
+        close_reason: o.closeReason ?? null,
+        created_at: o.createdAt,
+      }));
+    }
+    for (const p of this.positions.values()) {
+      promises.push(this.db.savePosition({
+        market: p.market,
+        side: p.side,
+        size_usd: p.sizeUsd,
+        leverage: p.leverage,
+        entry_price: p.entryPrice,
+        mark_price: p.markPrice,
+        initial_margin_usd: p.initialMarginUsd,
+        liquidation_price: p.liquidationPrice,
+        unrealized_pnl: p.unrealizedPnl,
+        stop_loss_price: p.stopLossPrice ?? null,
+        take_profit_price: p.takeProfitPrice ?? null,
+        trailing_stop_percent: p.trailingStopPercent ?? null,
+        is_live: false,
+        status: "open",
+        opened_at: p.openedAt,
+        last_updated: p.lastUpdated,
+      }));
+    }
+    await Promise.allSettled(promises);
+  }
+
   private saveState() {
     if (this.stateFilePath) {
       try {
@@ -68,46 +112,7 @@ export class PaperPerpsService {
         writeFileSync(this.stateFilePath, JSON.stringify(payload, null, 2), "utf8");
       } catch { /* ignore write failure */ }
     }
-    if (this.db) {
-      for (const o of this.orders.values()) {
-        void this.db.saveOrder({
-          id: o.id,
-          market: o.market,
-          side: o.side,
-          size_usd: o.sizeUsd,
-          leverage: o.leverage,
-          order_type: o.orderType,
-          status: o.status,
-          fill_price: o.fillPrice ?? null,
-          stop_loss_price: o.stopLossPrice ?? null,
-          take_profit_price: o.takeProfitPrice ?? null,
-          trailing_stop_percent: o.trailingStopPercent ?? null,
-          is_live: false,
-          close_reason: o.closeReason ?? null,
-          created_at: o.createdAt,
-        });
-      }
-      for (const p of this.positions.values()) {
-        void this.db.savePosition({
-          market: p.market,
-          side: p.side,
-          size_usd: p.sizeUsd,
-          leverage: p.leverage,
-          entry_price: p.entryPrice,
-          mark_price: p.markPrice,
-          initial_margin_usd: p.initialMarginUsd,
-          liquidation_price: p.liquidationPrice,
-          unrealized_pnl: p.unrealizedPnl,
-          stop_loss_price: p.stopLossPrice ?? null,
-          take_profit_price: p.takeProfitPrice ?? null,
-          trailing_stop_percent: p.trailingStopPercent ?? null,
-          is_live: false,
-          status: "open",
-          opened_at: p.openedAt,
-          last_updated: p.lastUpdated,
-        });
-      }
-    }
+    void this.saveDbState();
   }
   async hydrateFromDb(): Promise<void> {
     if (!this.db) return;
@@ -157,6 +162,9 @@ export class PaperPerpsService {
   }
 
   async ensureFreshMarks(): Promise<void> {
+    if (this.db) {
+      await this.hydrateFromDb();
+    }
     if (this.config.NODE_ENV === "test") return;
     const age = this.feedLastUpdated === null ? Infinity : this.now() - this.feedLastUpdated;
     if (age > this.config.PERPS_MARK_POLL_MS) {
@@ -240,7 +248,24 @@ export class PaperPerpsService {
 
   private processMarket(m:PerpsMarket,ts:number){if(!this.positions.has(m.symbol)){const o=[...this.orders.values()].filter(x=>x.market===m.symbol&&x.status==="open").sort((a,b)=>a.createdAt.localeCompare(b.createdAt)).find(x=>crossed(x,m.referencePrice));if(o){o.status="filled";o.fillPrice=o.limitPrice!;o.updatedAt=new Date(ts).toISOString();this.open(o,o.fillPrice,ts);this.saveState();}}const p=this.positions.get(m.symbol);if(!p)return;p.markPrice=m.referencePrice;p.lastUpdated=new Date(ts).toISOString();p.unrealizedPnl=pnl(p);const mark=parseDecimal(p.markPrice);ratchetTrailingStop(p,mark);const reason:PerpsCloseReason=liquidated(p,mark)?"liquidation":trigger(p,mark);if(reason)this.closePosition(p.market,"100",reason,ts);}
   private open(o:PerpsOrder,fill:string,ts:number){const size=parseDecimal(o.sizeUsd),lev=parseDecimal(o.leverage),margin=div(size,lev),fee=mul(size,FEE_RATE),move=div(SCALE,lev)-MAINTENANCE_RATE,entry=parseDecimal(fill),liq=o.side==="long"?mul(entry,SCALE-move):mul(entry,SCALE+move),at=new Date(ts).toISOString();this.balance-=fee;const p:PerpsPosition={market:o.market,side:o.side,sizeUsd:formatDecimal(size),leverage:o.leverage,entryPrice:fill,markPrice:this.market(o.market).referencePrice,initialMarginUsd:formatDecimal(margin),unrealizedPnl:"0",liquidationPrice:formatDecimal(liq<0n?0n:liq),takeProfitPrice:o.takeProfitPrice,stopLossPrice:o.stopLossPrice,trailingStopPercent:o.trailingStopPercent,openedAt:at,lastUpdated:at};if(o.trailingStopPercent){p.trailingWatermarkPrice=fill;p.trailingTriggerPrice=trailingTriggerPrice(p,parseDecimal(fill));}p.unrealizedPnl=pnl(p);this.positions.set(p.market,p);this.saveState();return p;}
-  private closePosition(symbol:string,percentage:string,reason:Exclude<PerpsCloseReason,null>,ts:number){const p=this.positions.get(symbol);if(!p)throw new AppError("Paper position not found","POSITION_NOT_FOUND",404);const percent=parseDecimal(percentage);if(percent<=0n||percent>100n*SCALE)throw new AppError("percentage must be greater than 0 and no more than 100","INVALID_PERCENTAGE",400);const fraction=div(percent,100n*SCALE),size=mul(parseDecimal(p.sizeUsd),fraction),fee=mul(size,FEE_RATE),realized=mul(signed(p.unrealizedPnl),fraction);this.balance+=realized-fee;const at=new Date(ts).toISOString(),o:PerpsOrder={id:randomUUID(),market:symbol,side:p.side==="long"?"short":"long",sizeUsd:formatDecimal(size),leverage:p.leverage,orderType:"market",reduceOnly:true,status:"filled",fillPrice:p.markPrice,createdAt:at,updatedAt:at,closeReason:reason};this.orders.set(o.id,o);if(percent===100n*SCALE)this.positions.delete(symbol);else{const remain=SCALE-fraction;p.sizeUsd=formatDecimal(mul(parseDecimal(p.sizeUsd),remain));p.initialMarginUsd=formatDecimal(mul(parseDecimal(p.initialMarginUsd),remain));p.unrealizedPnl=fmt(mul(signed(p.unrealizedPnl),remain));}this.saveState();return{order:{...o},position:this.positions.get(symbol)?{...this.positions.get(symbol)!}:null,account:this.getAccount()};}
+  private closePosition(symbol:string,percentage:string,reason:Exclude<PerpsCloseReason,null>,ts:number){const p=this.positions.get(symbol);if(!p)throw new AppError("Paper position not found","POSITION_NOT_FOUND",404);const percent=parseDecimal(percentage);if(percent<=0n||percent>100n*SCALE)throw new AppError("percentage must be greater than 0 and no more than 100","INVALID_PERCENTAGE",400);const fraction=div(percent,100n*SCALE),size=mul(parseDecimal(p.sizeUsd),fraction),fee=mul(size,FEE_RATE),realized=mul(signed(p.unrealizedPnl),fraction);this.balance+=realized-fee;const at=new Date(ts).toISOString(),o:PerpsOrder={id:randomUUID(),market:symbol,side:p.side==="long"?"short":"long",sizeUsd:formatDecimal(size),leverage:p.leverage,orderType:"market",reduceOnly:true,status:"filled",fillPrice:p.markPrice,createdAt:at,updatedAt:at,closeReason:reason};this.orders.set(o.id,o);if(percent===100n*SCALE) {
+      this.positions.delete(symbol);
+      if (this.db) {
+        void this.db.savePosition({
+          market: symbol,
+          side: p.side,
+          size_usd: "0",
+          leverage: p.leverage,
+          entry_price: p.entryPrice,
+          mark_price: p.markPrice,
+          initial_margin_usd: "0",
+          liquidation_price: p.liquidationPrice,
+          unrealized_pnl: p.unrealizedPnl,
+          is_live: false,
+          status: "closed",
+        });
+      }
+    }else{const remain=SCALE-fraction;p.sizeUsd=formatDecimal(mul(parseDecimal(p.sizeUsd),remain));p.initialMarginUsd=formatDecimal(mul(parseDecimal(p.initialMarginUsd),remain));p.unrealizedPnl=fmt(mul(signed(p.unrealizedPnl),remain));}this.saveState();return{order:{...o},position:this.positions.get(symbol)?{...this.positions.get(symbol)!}:null,account:this.getAccount()};}
   private market(symbol:string){const m=this.markets.find(x=>x.symbol===symbol.toUpperCase());if(!m)throw new AppError("Unsupported paper perpetual market","MARKET_NOT_FOUND",404);return m;}
 }
 const normalize=(r:PerpsOrderRequest):PerpsOrderRequest=>({...r,market:r.market.toUpperCase(),orderType:r.orderType??"market",reduceOnly:r.reduceOnly??false});

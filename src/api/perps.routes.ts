@@ -58,8 +58,21 @@ export function registerPerpsRoutes(app: FastifyInstance, deps: AppDependencies)
       throw new AppError("Live execution is disabled. Set ENABLE_LIVE_PERPS=true and provide a wallet PRIVATE_KEY in .env to trade on-chain.", "LIVE_PERPS_DISABLED", 403);
     }
     const { confirmationToken, ...order } = body;
-    return perps.place(order, confirmationToken);
+    const result = perps.place(order, confirmationToken);
+    await perps.saveDbState();
+    return result;
   });
-  app.delete("/api/perps/orders/:orderId", async (request) => ({ order: perps.cancel(z.object({ orderId: z.string().uuid() }).parse(request.params).orderId) }));
-  app.post("/api/perps/positions/:market/close", async (request) => { const { market } = z.object({ market: z.string().min(1) }).parse(request.params); const { percentage } = z.object({ percentage: decimal.default("100") }).parse(request.body ?? {}); return perps.close(market, percentage); });
+  app.delete("/api/perps/orders/:orderId", async (request) => {
+    const { orderId } = z.object({ orderId: z.string().uuid() }).parse(request.params);
+    const result = perps.cancel(orderId);
+    await perps.saveDbState();
+    return { order: result };
+  });
+  app.post("/api/perps/positions/:market/close", async (request) => {
+    const { market } = z.object({ market: z.string().min(1) }).parse(request.params);
+    const { percentage } = z.object({ percentage: decimal.default("100") }).parse(request.body ?? {});
+    const result = perps.close(market, percentage);
+    await perps.saveDbState();
+    return result;
+  });
 }
