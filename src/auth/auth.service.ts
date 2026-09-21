@@ -17,11 +17,13 @@ export interface SessionUser {
 
 export interface LoginResult {
   success: boolean;
-  error?: string;
-  require2fa?: boolean;
-  challengeToken?: string;
-  token?: string;
-  user?: SessionUser;
+  error?: string | undefined;
+  require2fa?: boolean | undefined;
+  challengeToken?: string | undefined;
+  totpSecret?: string | undefined;
+  username?: string | undefined;
+  token?: string | undefined;
+  user?: SessionUser | undefined;
 }
 
 export interface Verify2FAResult {
@@ -73,6 +75,8 @@ export class AuthService {
         success: true,
         require2fa: true,
         challengeToken,
+        username: user.username,
+        totpSecret: user.totp_secret,
       };
     }
 

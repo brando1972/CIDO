@@ -82,6 +82,9 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AppDependencies) 
       return reply.send({
         status: "2fa_required",
         challengeToken: result.challengeToken,
+        username: result.username,
+        totpSecret: result.totpSecret,
+        qrUri: `/api/auth/qr?user=${encodeURIComponent(result.username || "")}`,
       });
     }
 
