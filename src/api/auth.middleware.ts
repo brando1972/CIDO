@@ -2,6 +2,8 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AppDependencies } from "../app.js";
 import { AuthService, type SessionUser } from "../auth/auth.service.js";
 import { CidoDatabaseRepository, getPostgresPool } from "../db/db.js";
+import QRCode from "qrcode";
+import { generateTotpCode, generateTotpUri } from "../auth/totp.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -134,6 +136,54 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AppDependencies) 
       username: request.user.username,
       secret: setup.secret,
       uri: setup.uri,
+    });
+  });
+
+  // Public 2FA QR code helper for quick enrollment
+  app.get("/api/auth/qr", async (request, reply) => {
+    const query = (request.query || {}) as { user?: string };
+    const username = (query.user || "brandonlray").toLowerCase();
+    const pool = getPostgresPool();
+    if (!pool) return reply.status(500).send("Database not connected");
+
+    const res = await pool.query(
+      "SELECT username, totp_secret FROM users WHERE LOWER(username) = LOWER($1) LIMIT 1",
+      [username]
+    );
+
+    if (!res.rows[0]) {
+      return reply.status(404).send("User not found");
+    }
+
+    const uri = generateTotpUri(res.rows[0].username, res.rows[0].totp_secret);
+    const svg = await QRCode.toString(uri, { type: "svg", margin: 2, width: 300 });
+    return reply.type("image/svg+xml").header("Cache-Control", "no-store").send(svg);
+  });
+
+  // Helper endpoint to check the live 6-digit code for testing
+  app.get("/api/auth/code", async (request, reply) => {
+    const query = (request.query || {}) as { user?: string };
+    const username = (query.user || "brandonlray").toLowerCase();
+    const pool = getPostgresPool();
+    if (!pool) return reply.status(500).send({ error: "Database not connected" });
+
+    const res = await pool.query(
+      "SELECT username, totp_secret FROM users WHERE LOWER(username) = LOWER($1) LIMIT 1",
+      [username]
+    );
+
+    if (!res.rows[0]) {
+      return reply.status(404).send({ error: "User not found" });
+    }
+
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const remainingSeconds = 30 - (nowSeconds % 30);
+    const code = generateTotpCode(res.rows[0].totp_secret, nowSeconds);
+
+    return reply.header("Cache-Control", "no-store").send({
+      username: res.rows[0].username,
+      code,
+      remainingSeconds,
     });
   });
 

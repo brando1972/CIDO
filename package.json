@@ -16,7 +16,8 @@
     "quote:test": "tsx scripts/quote-test.ts",
     "balance:test": "tsx scripts/balance-test.ts",
     "round-trip": "tsx scripts/round-trip-test.ts",
-    "trade:test": "tsx scripts/execute-test-trade.ts"
+    "trade:test": "tsx scripts/execute-test-trade.ts",
+    "2fa": "tsx scripts/get-2fa-code.ts"
   },
   "dependencies": {
     "@pancakeswap/chains": "0.9.0",
@@ -28,12 +29,14 @@
     "fastify": "^5.2.1",
     "pg": "^8.23.0",
     "pino": "^9.6.0",
+    "qrcode": "^1.5.4",
     "viem": "2.37.13",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/node": "^22.13.4",
     "@types/pg": "^8.23.1",
+    "@types/qrcode": "^1.5.6",
     "@vercel/node": "^13.0.1",
     "tsx": "^4.19.3",
     "typescript": "^5.7.3",
