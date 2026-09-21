@@ -14,13 +14,30 @@ export function validatePerpsRisk(request: PerpsOrderRequest, market: PerpsMarke
   if (!request.reduceOnly && !request.stopLossPrice) throw new AppError("stopLossPrice is mandatory for every opening order", "STOP_LOSS_REQUIRED", 400);
   if (request.limitPrice && parseDecimal(request.limitPrice, "limitPrice") <= 0n) throw new AppError("limitPrice must be greater than zero", "INVALID_LIMIT_PRICE", 400);
   const entry = parseDecimal(request.limitPrice ?? market.referencePrice);
+  const currentPrice = request.limitPrice ?? market.referencePrice;
   if (request.takeProfitPrice) {
     const takeProfit = parseDecimal(request.takeProfitPrice, "takeProfitPrice");
-    if ((request.side === "long" && takeProfit <= entry) || (request.side === "short" && takeProfit >= entry)) throw new AppError(request.side === "long" ? "Long takeProfitPrice must be above entry price" : "Short takeProfitPrice must be below entry price", "INVALID_TAKE_PROFIT", 400);
+    if ((request.side === "long" && takeProfit <= entry) || (request.side === "short" && takeProfit >= entry)) {
+      throw new AppError(
+        request.side === "long"
+          ? `Long takeProfitPrice ($${request.takeProfitPrice}) must be above entry price ($${currentPrice})`
+          : `Short takeProfitPrice ($${request.takeProfitPrice}) must be below entry price ($${currentPrice})`,
+        "INVALID_TAKE_PROFIT",
+        400
+      );
+    }
   }
   if (request.stopLossPrice) {
     const stopLoss = parseDecimal(request.stopLossPrice, "stopLossPrice");
-    if (stopLoss <= 0n || (request.side === "long" && stopLoss >= entry) || (request.side === "short" && stopLoss <= entry)) throw new AppError(request.side === "long" ? "Long stopLossPrice must be below entry price" : "Short stopLossPrice must be above entry price", "INVALID_STOP_LOSS", 400);
+    if (stopLoss <= 0n || (request.side === "long" && stopLoss >= entry) || (request.side === "short" && stopLoss <= entry)) {
+      throw new AppError(
+        request.side === "long"
+          ? `Long stopLossPrice ($${request.stopLossPrice}) must be below current entry price ($${currentPrice})`
+          : `Short stopLossPrice ($${request.stopLossPrice}) must be above current entry price ($${currentPrice})`,
+        "INVALID_STOP_LOSS",
+        400
+      );
+    }
   }
   if (request.trailingStopPercent) {
     const trailingStop = parseDecimal(request.trailingStopPercent, "trailingStopPercent");
