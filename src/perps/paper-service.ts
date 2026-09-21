@@ -9,6 +9,7 @@ import { validatePerpsRisk } from "./risk.js";
 import type { PerpsAccount, PerpsCloseReason, PerpsFeedStatus, PerpsMarket, PerpsOrder, PerpsOrderRequest, PerpsPosition, PerpsPreview, PerpsSafetyState } from "./types.js";
 
 import type { DatabaseRepository } from "../db/supabase.js";
+import type { CidoDatabaseRepository } from "../db/db.js";
 
 const FEE_RATE = 50_000n, MAINTENANCE_RATE = 50_000n, PREVIEW_TTL_MS = 30_000;
 const referenceMarkets = (max: number): PerpsMarket[] => [
@@ -16,7 +17,7 @@ const referenceMarkets = (max: number): PerpsMarket[] => [
   { symbol: "ETHUSD", baseAsset: "ETH", quoteAsset: "USD", referencePrice: "2500", fundingRate: "0", nextFundingTime: null, maxLeverage: String(max), lastUpdated: null },
   { symbol: "BNBUSD", baseAsset: "BNB", quoteAsset: "USD", referencePrice: "600", fundingRate: "0", nextFundingTime: null, maxLeverage: String(max), lastUpdated: null }
 ];
-export interface PaperPerpsDependencies { now?: () => number; provider?: MarkPriceProvider; stateFilePath?: string; db?: DatabaseRepository; }
+export interface PaperPerpsDependencies { now?: () => number; provider?: MarkPriceProvider; stateFilePath?: string; db?: DatabaseRepository | CidoDatabaseRepository; }
 
 export class PaperPerpsService {
   readonly mode = "paper" as const;
@@ -28,7 +29,7 @@ export class PaperPerpsService {
   private readonly previews = new Map<string, { requestHash: string; expiresAt: number }>();
   private readonly now: () => number; private readonly provider: MarkPriceProvider;
   private readonly stateFilePath: string | undefined;
-  private readonly db: DatabaseRepository | undefined;
+  private readonly db: DatabaseRepository | CidoDatabaseRepository | undefined;
   private pollTimer: NodeJS.Timeout | undefined; private refreshInFlight: Promise<void> | undefined;
   private feedLastUpdated: number | null = null; private feedError: string | null = null;
   private safety: PerpsSafetyState = { killSwitchEnabled: false, reason: null, changedAt: null };

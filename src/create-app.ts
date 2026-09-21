@@ -9,6 +9,8 @@ import { buildApp } from "./app.js";
 import { getAddress } from "viem";
 import { PaperPerpsService } from "./perps/paper-service.js";
 import { getSupabaseClient, DatabaseRepository } from "./db/supabase.js";
+import { getPostgresPool, CidoDatabaseRepository } from "./db/db.js";
+import { AuthService } from "./auth/auth.service.js";
 
 export interface CreateAppOptions {
   isServerless?: boolean;
@@ -34,8 +36,11 @@ export async function createApp(options: CreateAppOptions = {}) {
   });
 
   const trades = new TradeService(config, chain.chain.id, address, dex, balances);
-  const supabaseClient = getSupabaseClient(config);
-  const db = supabaseClient ? new DatabaseRepository(supabaseClient) : undefined;
+  const pool = getPostgresPool();
+  const cidoDb = pool ? new CidoDatabaseRepository(pool) : undefined;
+  const supabaseClient = !cidoDb ? getSupabaseClient(config) : null;
+  const db = cidoDb || (supabaseClient ? new DatabaseRepository(supabaseClient) : undefined);
+  const authService = cidoDb ? new AuthService(cidoDb) : undefined;
 
   const stateFilePath = options.isServerless ? "/tmp/paper-state.json" : "./data/paper-state.json";
   const perps = new PaperPerpsService(config, {
@@ -60,6 +65,7 @@ export async function createApp(options: CreateAppOptions = {}) {
     trades,
     perps,
     ...(db ? { db } : {}),
+    ...(authService ? { authService } : {}),
   });
 
   if (!options.isServerless) {
