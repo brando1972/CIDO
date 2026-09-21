@@ -53,7 +53,7 @@ export function registerPerpsRoutes(app: FastifyInstance, deps: AppDependencies)
   });
   app.post("/api/perps/orders", async (request) => {
     await perps.ensureFreshMarks();
-    const body = orderSchema.extend({ confirmationToken: z.string().uuid() }).parse(request.body);
+    const body = orderSchema.extend({ confirmationToken: z.string().min(1) }).parse(request.body);
     if (body.isLive && !deps.config.ENABLE_LIVE_PERPS) {
       throw new AppError("Live execution is disabled. Set ENABLE_LIVE_PERPS=true and provide a wallet PRIVATE_KEY in .env to trade on-chain.", "LIVE_PERPS_DISABLED", 403);
     }

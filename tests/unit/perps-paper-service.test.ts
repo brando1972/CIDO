@@ -49,6 +49,25 @@ describe("PaperPerpsService", () => {
     const preview = service.preview(marketOrder);
     expect(() => service.place({ ...marketOrder, sizeUsd: "1001" }, preview.confirmationToken)).toThrow(/confirmation/i);
   });
+  it("verifies confirmation token statelessly across instances without shared memory", () => {
+    const sharedSecret = "test-secret-key-xyz";
+    const instanceA = new PaperPerpsService(config(), { now: () => 1_000, secret: sharedSecret });
+    const instanceB = new PaperPerpsService(config(), { now: () => 1_500, secret: sharedSecret });
+
+    const preview = instanceA.preview(marketOrder);
+    expect(preview.confirmationToken).toMatch(/^ct_/);
+
+    // Instance B has no memory of this preview, but can verify HMAC statelessly
+    const placed = instanceB.place(marketOrder, preview.confirmationToken);
+    expect(placed.order.status).toBe("filled");
+
+    // Tampered order params must fail
+    expect(() => instanceB.place({ ...marketOrder, sizeUsd: "500" }, preview.confirmationToken)).toThrow(/confirmation/i);
+
+    // Expired token (>120s) must fail
+    const expiredInstance = new PaperPerpsService(config(), { now: () => 1_000 + 130_000, secret: sharedSecret });
+    expect(() => expiredInstance.place(marketOrder, preview.confirmationToken)).toThrow(/confirmation/i);
+  });
   it("fills, charges fees, and closes", () => {
     const service = new PaperPerpsService(config(), () => 1_000); const preview = service.preview(marketOrder);
     expect(preview).toMatchObject({ initialMarginUsd: "333.33333333", estimatedFeeUsd: "0.5", estimatedEntryPrice: "60000" });

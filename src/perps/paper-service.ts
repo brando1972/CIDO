@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { AppError } from "../utils/errors.js";
@@ -11,13 +11,13 @@ import type { PerpsAccount, PerpsCloseReason, PerpsFeedStatus, PerpsMarket, Perp
 import type { DatabaseRepository } from "../db/supabase.js";
 import type { CidoDatabaseRepository } from "../db/db.js";
 
-const FEE_RATE = 50_000n, MAINTENANCE_RATE = 50_000n, PREVIEW_TTL_MS = 30_000;
+const FEE_RATE = 50_000n, MAINTENANCE_RATE = 50_000n, PREVIEW_TTL_MS = 120_000;
 const referenceMarkets = (max: number): PerpsMarket[] => [
   { symbol: "BTCUSD", baseAsset: "BTC", quoteAsset: "USD", referencePrice: "60000", fundingRate: "0", nextFundingTime: null, maxLeverage: String(max), lastUpdated: null },
   { symbol: "ETHUSD", baseAsset: "ETH", quoteAsset: "USD", referencePrice: "2500", fundingRate: "0", nextFundingTime: null, maxLeverage: String(max), lastUpdated: null },
   { symbol: "BNBUSD", baseAsset: "BNB", quoteAsset: "USD", referencePrice: "600", fundingRate: "0", nextFundingTime: null, maxLeverage: String(max), lastUpdated: null }
 ];
-export interface PaperPerpsDependencies { now?: () => number; provider?: MarkPriceProvider; stateFilePath?: string; db?: DatabaseRepository | CidoDatabaseRepository; }
+export interface PaperPerpsDependencies { now?: () => number; provider?: MarkPriceProvider; stateFilePath?: string; db?: DatabaseRepository | CidoDatabaseRepository; secret?: string; }
 
 export class PaperPerpsService {
   readonly mode = "paper" as const;
@@ -30,6 +30,7 @@ export class PaperPerpsService {
   private readonly now: () => number; private readonly provider: MarkPriceProvider;
   private readonly stateFilePath: string | undefined;
   private readonly db: DatabaseRepository | CidoDatabaseRepository | undefined;
+  private readonly secret: string;
   private pollTimer: NodeJS.Timeout | undefined; private refreshInFlight: Promise<void> | undefined;
   private feedLastUpdated: number | null = null; private feedError: string | null = null;
   private safety: PerpsSafetyState = { killSwitchEnabled: false, reason: null, changedAt: null };
@@ -45,6 +46,7 @@ export class PaperPerpsService {
       : new BinanceUsdMMarkPriceProvider(config.PERPS_MARK_PRICE_URL);
     this.provider = deps.provider ?? defaultProvider;
     this.dataSource = this.provider.source;
+    this.secret = (typeof clockOrDeps === "object" && clockOrDeps.secret) || process.env.JWT_SECRET || "cido-order-preview-salt-2026";
     this.balance = parseDecimal(config.PERPS_INITIAL_BALANCE_USD); this.markets = referenceMarkets(config.PERPS_MAX_LEVERAGE);
     this.loadSavedState();
   }
@@ -176,8 +178,62 @@ export class PaperPerpsService {
   listPositions() { return [...this.positions.values()].map(p => ({ ...p })); }
   getAccount(): PerpsAccount { let used=0n,pnl=0n; for(const p of this.positions.values()){used+=parseDecimal(p.initialMarginUsd);pnl+=signed(p.unrealizedPnl);} const equity=this.balance+pnl; return {mode:"paper",currency:"USD",balance:formatDecimal(this.balance),equity:fmt(equity),availableMargin:fmt(equity-used),usedMargin:formatDecimal(used),unrealizedPnl:fmt(pnl)}; }
 
-  preview(input: PerpsOrderRequest): PerpsPreview { if(this.safety.killSwitchEnabled)throw new AppError("Perpetuals kill switch is enabled","PERPS_KILL_SWITCH",423); const r=normalize(input),m=this.market(r.market); validatePerpsRisk(r,m,this.getAccount().availableMargin,this.config.PERPS_MAX_ORDER_USD); const price=r.limitPrice??m.referencePrice,size=parseDecimal(r.sizeUsd),lev=parseDecimal(r.leverage),entry=parseDecimal(price),margin=div(size,lev),fee=mul(size,FEE_RATE),move=div(SCALE,lev)-MAINTENANCE_RATE,liq=r.side==="long"?mul(entry,SCALE-move):mul(entry,SCALE+move),expiry=this.now()+PREVIEW_TTL_MS,token=randomUUID(); this.previews.set(token,{requestHash:hash(r),expiresAt:expiry}); return {...r,referencePrice:m.referencePrice,estimatedEntryPrice:price,notionalUsd:formatDecimal(size),initialMarginUsd:formatDecimal(margin),estimatedFeeUsd:formatDecimal(fee),liquidationPrice:formatDecimal(liq<0n?0n:liq),confirmationToken:token,expiresAt:new Date(expiry).toISOString()}; }
-  place(input: PerpsOrderRequest, token: string) { const r=normalize(input),c=this.previews.get(token); if(!c||c.expiresAt<this.now()||c.requestHash!==hash(r))throw new AppError("Preview confirmation is missing, expired, or does not match the order","INVALID_CONFIRMATION",409); this.previews.delete(token); if(r.reduceOnly)throw new AppError("Use the paper position close endpoint for reduce-only orders","REDUCE_ONLY_ROUTE",400); const preview=this.preview(r);this.previews.delete(preview.confirmationToken); const ts=this.now(),at=new Date(ts).toISOString(),m=this.market(r.market),filled=r.orderType==="market"||crossed(r,m.referencePrice); if(filled&&this.positions.has(r.market))throw new AppError("Close the existing paper position before opening another in this market","POSITION_EXISTS",409); const fill=filled?(r.orderType==="market"?m.referencePrice:r.limitPrice!):null,o:PerpsOrder={id:randomUUID(),...r,status:filled?"filled":"open",fillPrice:fill,createdAt:at,updatedAt:at};this.orders.set(o.id,o);const p=filled?this.open(o,fill!,ts):null;this.saveState();return{order:{...o},position:p?{...p}:null,account:this.getAccount()}; }
+  preview(input: PerpsOrderRequest): PerpsPreview {
+    if (this.safety.killSwitchEnabled) throw new AppError("Perpetuals kill switch is enabled", "PERPS_KILL_SWITCH", 423);
+    const r = normalize(input), m = this.market(r.market);
+    validatePerpsRisk(r, m, this.getAccount().availableMargin, this.config.PERPS_MAX_ORDER_USD);
+    const price = r.limitPrice ?? m.referencePrice,
+      size = parseDecimal(r.sizeUsd),
+      lev = parseDecimal(r.leverage),
+      entry = parseDecimal(price),
+      margin = div(size, lev),
+      fee = mul(size, FEE_RATE),
+      move = div(SCALE, lev) - MAINTENANCE_RATE,
+      liq = r.side === "long" ? mul(entry, SCALE - move) : mul(entry, SCALE + move),
+      expiry = this.now() + PREVIEW_TTL_MS,
+      token = createConfirmationToken(r, expiry, this.secret);
+    this.previews.set(token, { requestHash: hash(r), expiresAt: expiry });
+    return {
+      ...r,
+      referencePrice: m.referencePrice,
+      estimatedEntryPrice: price,
+      notionalUsd: formatDecimal(size),
+      initialMarginUsd: formatDecimal(margin),
+      estimatedFeeUsd: formatDecimal(fee),
+      liquidationPrice: formatDecimal(liq < 0n ? 0n : liq),
+      confirmationToken: token,
+      expiresAt: new Date(expiry).toISOString()
+    };
+  }
+
+  place(input: PerpsOrderRequest, token: string) {
+    const r = normalize(input);
+    const c = this.previews.get(token);
+    let valid = false;
+    if (c) {
+      if (c.expiresAt >= this.now() && c.requestHash === hash(r)) {
+        valid = true;
+        this.previews.delete(token);
+      }
+    } else if (verifyConfirmationToken(token, r, this.now(), this.secret)) {
+      valid = true;
+    }
+    if (!valid) throw new AppError("Preview confirmation is missing, expired, or does not match the order", "INVALID_CONFIRMATION", 409);
+    if (r.reduceOnly) throw new AppError("Use the paper position close endpoint for reduce-only orders", "REDUCE_ONLY_ROUTE", 400);
+    const preview = this.preview(r);
+    this.previews.delete(preview.confirmationToken);
+    const ts = this.now(),
+      at = new Date(ts).toISOString(),
+      m = this.market(r.market),
+      filled = r.orderType === "market" || crossed(r, m.referencePrice);
+    if (filled && this.positions.has(r.market)) throw new AppError("Close the existing paper position before opening another in this market", "POSITION_EXISTS", 409);
+    const fill = filled ? (r.orderType === "market" ? m.referencePrice : r.limitPrice!) : null,
+      o: PerpsOrder = { id: randomUUID(), ...r, status: filled ? "filled" : "open", fillPrice: fill, createdAt: at, updatedAt: at };
+    this.orders.set(o.id, o);
+    const p = filled ? this.open(o, fill!, ts) : null;
+    this.saveState();
+    return { order: { ...o }, position: p ? { ...p } : null, account: this.getAccount() };
+  }
   cancel(id:string){const o=this.orders.get(id);if(!o)throw new AppError("Paper order not found","ORDER_NOT_FOUND",404);if(o.status!=="open")throw new AppError("Only open paper orders can be cancelled","ORDER_NOT_OPEN",409);o.status="cancelled";o.updatedAt=new Date(this.now()).toISOString();this.saveState();return{...o};}
   close(symbol:string,percentage="100"){return this.closePosition(symbol.toUpperCase(),percentage,"manual",this.now());}
   emergencyCloseAll(reason="operator emergency close") { this.setKillSwitch(true, reason); const results=[]; for(const symbol of [...this.positions.keys()])results.push(this.closePosition(symbol,"100","manual",this.now())); for(const order of this.orders.values()){if(order.status==="open"){order.status="cancelled";order.updatedAt=new Date(this.now()).toISOString();}} this.saveState(); return { safety:this.getSafetyState(), closedPositions:results.length, account:this.getAccount() }; }
@@ -189,6 +245,37 @@ export class PaperPerpsService {
 }
 const normalize=(r:PerpsOrderRequest):PerpsOrderRequest=>({...r,market:r.market.toUpperCase(),orderType:r.orderType??"market",reduceOnly:r.reduceOnly??false});
 const hash=(r:PerpsOrderRequest)=>createHash("sha256").update(JSON.stringify(r)).digest("hex");
+function orderCanonical(r: PerpsOrderRequest): string {
+  return [
+    r.market.toUpperCase(),
+    r.side.toLowerCase(),
+    r.sizeUsd,
+    r.leverage,
+    r.orderType ?? "market",
+    r.limitPrice ?? "",
+    r.stopLossPrice ?? "",
+    r.takeProfitPrice ?? "",
+    r.trailingStopPercent ?? "",
+    r.reduceOnly ? "1" : "0"
+  ].join("|");
+}
+function createConfirmationToken(r: PerpsOrderRequest, expiresAt: number, secret: string): string {
+  const canonical = orderCanonical(r);
+  const sig = createHmac("sha256", secret).update(`${expiresAt}:${canonical}`).digest("hex");
+  return `ct_${expiresAt}_${sig}`;
+}
+function verifyConfirmationToken(token: string, r: PerpsOrderRequest, now: number, secret: string): boolean {
+  if (!token || typeof token !== "string" || !token.startsWith("ct_")) return false;
+  const parts = token.split("_");
+  if (parts.length !== 3) return false;
+  const expiresAt = Number(parts[1]);
+  if (!Number.isFinite(expiresAt) || expiresAt < now) return false;
+  const canonical = orderCanonical(r);
+  const expectedSig = createHmac("sha256", secret).update(`${expiresAt}:${canonical}`).digest("hex");
+  const sig = parts[2];
+  if (!sig || sig.length !== expectedSig.length) return false;
+  return timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig));
+}
 const signed=(v:string)=>v.startsWith("-")?-parseDecimal(v.slice(1)):parseDecimal(v); const fmt=(v:bigint)=>v<0n?`-${formatDecimal(-v)}`:formatDecimal(v);
 const crossed=(o:Pick<PerpsOrderRequest,"side"|"limitPrice">,mark:string)=>o.side==="long"?parseDecimal(mark)<=parseDecimal(o.limitPrice!):parseDecimal(mark)>=parseDecimal(o.limitPrice!);
 const pnl=(p:PerpsPosition)=>fmt(div(mul(parseDecimal(p.sizeUsd),p.side==="long"?parseDecimal(p.markPrice)-parseDecimal(p.entryPrice):parseDecimal(p.entryPrice)-parseDecimal(p.markPrice)),parseDecimal(p.entryPrice)));
