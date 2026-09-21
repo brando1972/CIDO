@@ -8,13 +8,15 @@ import { AsterPerpsV2TestnetMarkPriceProvider, BinanceUsdMMarkPriceProvider, typ
 import { validatePerpsRisk } from "./risk.js";
 import type { PerpsAccount, PerpsCloseReason, PerpsFeedStatus, PerpsMarket, PerpsOrder, PerpsOrderRequest, PerpsPosition, PerpsPreview, PerpsSafetyState } from "./types.js";
 
+import type { DatabaseRepository } from "../db/supabase.js";
+
 const FEE_RATE = 50_000n, MAINTENANCE_RATE = 50_000n, PREVIEW_TTL_MS = 30_000;
 const referenceMarkets = (max: number): PerpsMarket[] => [
   { symbol: "BTCUSD", baseAsset: "BTC", quoteAsset: "USD", referencePrice: "60000", fundingRate: "0", nextFundingTime: null, maxLeverage: String(max), lastUpdated: null },
   { symbol: "ETHUSD", baseAsset: "ETH", quoteAsset: "USD", referencePrice: "2500", fundingRate: "0", nextFundingTime: null, maxLeverage: String(max), lastUpdated: null },
   { symbol: "BNBUSD", baseAsset: "BNB", quoteAsset: "USD", referencePrice: "600", fundingRate: "0", nextFundingTime: null, maxLeverage: String(max), lastUpdated: null }
 ];
-export interface PaperPerpsDependencies { now?: () => number; provider?: MarkPriceProvider; stateFilePath?: string; }
+export interface PaperPerpsDependencies { now?: () => number; provider?: MarkPriceProvider; stateFilePath?: string; db?: DatabaseRepository; }
 
 export class PaperPerpsService {
   readonly mode = "paper" as const;
@@ -26,6 +28,7 @@ export class PaperPerpsService {
   private readonly previews = new Map<string, { requestHash: string; expiresAt: number }>();
   private readonly now: () => number; private readonly provider: MarkPriceProvider;
   private readonly stateFilePath: string | undefined;
+  private readonly db: DatabaseRepository | undefined;
   private pollTimer: NodeJS.Timeout | undefined; private refreshInFlight: Promise<void> | undefined;
   private feedLastUpdated: number | null = null; private feedError: string | null = null;
   private safety: PerpsSafetyState = { killSwitchEnabled: false, reason: null, changedAt: null };
@@ -35,6 +38,7 @@ export class PaperPerpsService {
     const deps = typeof clockOrDeps === "function" ? { now: clockOrDeps } : clockOrDeps;
     this.now = deps.now ?? Date.now;
     this.stateFilePath = deps.stateFilePath;
+    this.db = deps.db;
     const defaultProvider = config.PERPS_MARK_PROVIDER === "aster-testnet"
       ? new AsterPerpsV2TestnetMarkPriceProvider(config.PERPS_MARK_PRICE_URL)
       : new BinanceUsdMMarkPriceProvider(config.PERPS_MARK_PRICE_URL);
@@ -53,13 +57,54 @@ export class PaperPerpsService {
     } catch { /* ignore corrupted state */ }
   }
   private saveState() {
-    if (!this.stateFilePath) return;
-    try {
-      const dir = dirname(this.stateFilePath);
-      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-      const payload = { balance: formatDecimal(this.balance), orders: [...this.orders.values()], positions: [...this.positions.values()] };
-      writeFileSync(this.stateFilePath, JSON.stringify(payload, null, 2), "utf8");
-    } catch { /* ignore write failure */ }
+    if (this.stateFilePath) {
+      try {
+        const dir = dirname(this.stateFilePath);
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+        const payload = { balance: formatDecimal(this.balance), orders: [...this.orders.values()], positions: [...this.positions.values()] };
+        writeFileSync(this.stateFilePath, JSON.stringify(payload, null, 2), "utf8");
+      } catch { /* ignore write failure */ }
+    }
+    if (this.db) {
+      for (const o of this.orders.values()) {
+        void this.db.saveOrder({
+          id: o.id,
+          market: o.market,
+          side: o.side,
+          size_usd: o.sizeUsd,
+          leverage: o.leverage,
+          order_type: o.orderType,
+          status: o.status,
+          fill_price: o.fillPrice ?? null,
+          stop_loss_price: o.stopLossPrice ?? null,
+          take_profit_price: o.takeProfitPrice ?? null,
+          trailing_stop_percent: o.trailingStopPercent ?? null,
+          is_live: false,
+          close_reason: o.closeReason ?? null,
+          created_at: o.createdAt,
+        });
+      }
+      for (const p of this.positions.values()) {
+        void this.db.savePosition({
+          market: p.market,
+          side: p.side,
+          size_usd: p.sizeUsd,
+          leverage: p.leverage,
+          entry_price: p.entryPrice,
+          mark_price: p.markPrice,
+          initial_margin_usd: p.initialMarginUsd,
+          liquidation_price: p.liquidationPrice,
+          unrealized_pnl: p.unrealizedPnl,
+          stop_loss_price: p.stopLossPrice ?? null,
+          take_profit_price: p.takeProfitPrice ?? null,
+          trailing_stop_percent: p.trailingStopPercent ?? null,
+          is_live: false,
+          status: "open",
+          opened_at: p.openedAt,
+          last_updated: p.lastUpdated,
+        });
+      }
+    }
   }
   start() { if (!this.pollTimer) { void this.refreshMarks(); this.pollTimer = setInterval(() => void this.refreshMarks(), this.config.PERPS_MARK_POLL_MS); this.pollTimer.unref(); } }
   stop() { if (this.pollTimer) clearInterval(this.pollTimer); this.pollTimer = undefined; }

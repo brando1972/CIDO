@@ -17,8 +17,9 @@ import { registerPerpsRoutes } from "./api/perps.routes.js";
 import { registerSpcxRoutes } from "./api/spcx.routes.js";
 import { registerAuthRoutes } from "./api/auth.middleware.js";
 import type { PaperPerpsService } from "./perps/paper-service.js";
+import type { DatabaseRepository } from "./db/supabase.js";
 
-export interface AppDependencies { config: AppConfig; blockchain: BlockchainClient; wallet: TradingWallet; walletAddress?: Address; balances?: BalanceService; trades: TradeService; perps: PaperPerpsService; }
+export interface AppDependencies { config: AppConfig; blockchain: BlockchainClient; wallet: TradingWallet; walletAddress?: Address; balances?: BalanceService; trades: TradeService; perps: PaperPerpsService; db?: DatabaseRepository; }
 
 export function buildApp(deps: AppDependencies) {
   const app = Fastify({ logger: { level: deps.config.NODE_ENV === "test" ? "silent" : "info", redact: ["req.headers.authorization", "*.PRIVATE_KEY", "privateKey", "secret", "passphrase"] } });

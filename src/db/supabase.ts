@@ -64,7 +64,11 @@ export interface StoredPosition {
 }
 
 export class DatabaseRepository {
-  constructor(private readonly supabase: SupabaseClient | null) {}
+  private readonly supabase: SupabaseClient | null;
+
+  constructor(supabase: SupabaseClient | null) {
+    this.supabase = supabase;
+  }
 
   get isEnabled(): boolean {
     return this.supabase !== null;
