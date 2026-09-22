@@ -34,6 +34,7 @@ export class PaperPerpsService {
   private pollTimer: NodeJS.Timeout | undefined; private refreshInFlight: Promise<void> | undefined;
   private feedLastUpdated: number | null = null; private feedError: string | null = null;
   private safety: PerpsSafetyState = { killSwitchEnabled: false, reason: null, changedAt: null };
+  private pendingDbWrites: Promise<unknown>[] = [];
 
   constructor(private readonly config: AppConfig, clockOrDeps: (() => number) | PaperPerpsDependencies = {}) {
     if (config.PERPS_MODE !== "paper" || config.ENABLE_LIVE_PERPS) throw new AppError("Live perpetuals execution is not implemented or permitted", "LIVE_PERPS_DISABLED", 503);
@@ -61,7 +62,8 @@ export class PaperPerpsService {
   }
   async saveDbState(): Promise<void> {
     if (!this.db) return;
-    const promises: Promise<unknown>[] = [];
+    const promises: Promise<unknown>[] = [...this.pendingDbWrites];
+    this.pendingDbWrites = [];
     promises.push(this.db.saveAccountBalance(formatDecimal(this.balance)));
     for (const o of this.orders.values()) {
       promises.push(this.db.saveOrder({
@@ -184,7 +186,15 @@ export class PaperPerpsService {
   start() { if (!this.pollTimer) { void this.refreshMarks(); this.pollTimer = setInterval(() => void this.refreshMarks(), this.config.PERPS_MARK_POLL_MS); this.pollTimer.unref(); } }
   stop() { if (this.pollTimer) clearInterval(this.pollTimer); this.pollTimer = undefined; }
   async refreshMarks() { if (this.refreshInFlight) return this.refreshInFlight; this.refreshInFlight = this.fetchMarks().finally(() => { this.refreshInFlight = undefined; }); return this.refreshInFlight; }
-  private async fetchMarks() { try { this.applyMarkPrices(await this.provider.getMarkPrices(this.markets.map(m => m.symbol))); this.feedError = null; } catch (e) { this.feedError = e instanceof Error ? e.message : "Unknown mark-price provider error"; } }
+  private async fetchMarks() {
+    try {
+      this.applyMarkPrices(await this.provider.getMarkPrices(this.markets.map(m => m.symbol)));
+      if (this.db) await this.saveDbState();
+      this.feedError = null;
+    } catch (e) {
+      this.feedError = e instanceof Error ? e.message : "Unknown mark-price provider error";
+    }
+  }
   applyMarkPrices(ticks: readonly MarkPriceTick[]) { for (const tick of ticks) { const m = this.markets.find(x => x.symbol === tick.symbol.toUpperCase()); if (!m) continue; m.referencePrice = formatDecimal(parseDecimal(tick.price)); if (tick.fundingRate !== undefined) m.fundingRate = fmt(signed(tick.fundingRate)); if (tick.nextFundingTime !== undefined) m.nextFundingTime = new Date(tick.nextFundingTime).toISOString(); m.lastUpdated = new Date(tick.timestamp).toISOString(); this.feedLastUpdated = Math.max(this.feedLastUpdated ?? 0, tick.timestamp); this.processMarket(m, tick.timestamp); } }
   getFeedStatus(): PerpsFeedStatus { const age = this.feedLastUpdated === null ? Infinity : this.now() - this.feedLastUpdated; const status = this.feedLastUpdated === null ? (this.feedError ? "error" : "initializing") : age > this.config.PERPS_MARK_STALE_MS ? "stale" : "live"; return { source: this.dataSource, status, lastUpdated: this.feedLastUpdated === null ? null : new Date(this.feedLastUpdated).toISOString(), staleAfterMs: this.config.PERPS_MARK_STALE_MS, error: this.feedError }; }
   getTicker() { return { mode: this.mode, feed: this.getFeedStatus(), markets: this.listMarkets() }; }
@@ -274,12 +284,12 @@ export class PaperPerpsService {
   close(symbol:string,percentage="100"){return this.closePosition(symbol.toUpperCase(),percentage,"manual",this.now());}
   emergencyCloseAll(reason="operator emergency close") { this.setKillSwitch(true, reason); const results=[]; for(const symbol of [...this.positions.keys()])results.push(this.closePosition(symbol,"100","manual",this.now())); for(const order of this.orders.values()){if(order.status==="open"){order.status="cancelled";order.updatedAt=new Date(this.now()).toISOString();}} this.saveState(); return { safety:this.getSafetyState(), closedPositions:results.length, account:this.getAccount() }; }
 
-  private processMarket(m:PerpsMarket,ts:number){if(!this.positions.has(m.symbol)){const o=[...this.orders.values()].filter(x=>x.market===m.symbol&&x.status==="open").sort((a,b)=>a.createdAt.localeCompare(b.createdAt)).find(x=>crossed(x,m.referencePrice));if(o){o.status="filled";o.fillPrice=o.limitPrice!;o.updatedAt=new Date(ts).toISOString();this.open(o,o.fillPrice,ts);this.saveState();}}const p=this.positions.get(m.symbol);if(!p)return;p.markPrice=m.referencePrice;p.lastUpdated=new Date(ts).toISOString();p.unrealizedPnl=pnl(p);const mark=parseDecimal(p.markPrice);ratchetTrailingStop(p,mark);const reason:PerpsCloseReason=liquidated(p,mark)?"liquidation":trigger(p,mark);if(reason)this.closePosition(p.market,"100",reason,ts);}
+  private processMarket(m:PerpsMarket,ts:number){if(!this.positions.has(m.symbol)){const o=[...this.orders.values()].filter(x=>x.market===m.symbol&&x.status==="open").sort((a,b)=>a.createdAt.localeCompare(b.createdAt)).find(x=>crossed(x,m.referencePrice));if(o){o.status="filled";o.fillPrice=o.limitPrice!;o.updatedAt=new Date(ts).toISOString();this.open(o,o.fillPrice,ts);this.saveState();}}const p=this.positions.get(m.symbol);if(!p||(p as any).isClosing)return;p.markPrice=m.referencePrice;p.lastUpdated=new Date(ts).toISOString();p.unrealizedPnl=pnl(p);const mark=parseDecimal(p.markPrice);ratchetTrailingStop(p,mark);const reason:PerpsCloseReason=liquidated(p,mark)?"liquidation":trigger(p,mark);if(reason){(p as any).isClosing=true;this.closePosition(p.market,"100",reason,ts);}}
   private open(o:PerpsOrder,fill:string,ts:number){const size=parseDecimal(o.sizeUsd),lev=parseDecimal(o.leverage),margin=div(size,lev),fee=mul(size,FEE_RATE),move=div(SCALE,lev)-MAINTENANCE_RATE,entry=parseDecimal(fill),liq=o.side==="long"?mul(entry,SCALE-move):mul(entry,SCALE+move),at=new Date(ts).toISOString();this.balance-=fee;o.feeUsd=formatDecimal(fee);const p:PerpsPosition={market:o.market,side:o.side,sizeUsd:formatDecimal(size),leverage:o.leverage,entryPrice:fill,markPrice:this.market(o.market).referencePrice,initialMarginUsd:formatDecimal(margin),unrealizedPnl:"0",liquidationPrice:formatDecimal(liq<0n?0n:liq),takeProfitPrice:o.takeProfitPrice,stopLossPrice:o.stopLossPrice,trailingStopPercent:o.trailingStopPercent,openedAt:at,lastUpdated:at};if(o.trailingStopPercent){p.trailingWatermarkPrice=fill;p.trailingTriggerPrice=trailingTriggerPrice(p,parseDecimal(fill));}p.unrealizedPnl=pnl(p);this.positions.set(p.market,p);this.saveState();return p;}
   private closePosition(symbol:string,percentage:string,reason:Exclude<PerpsCloseReason,null>,ts:number){const p=this.positions.get(symbol);if(!p)throw new AppError("Paper position not found","POSITION_NOT_FOUND",404);const percent=parseDecimal(percentage);if(percent<=0n||percent>100n*SCALE)throw new AppError("percentage must be greater than 0 and no more than 100","INVALID_PERCENTAGE",400);const fraction=div(percent,100n*SCALE),size=mul(parseDecimal(p.sizeUsd),fraction),fee=mul(size,FEE_RATE),realized=mul(signed(p.unrealizedPnl),fraction);const netRealized=realized-fee;this.balance+=netRealized;const at=new Date(ts).toISOString(),o:PerpsOrder={id:randomUUID(),market:symbol,side:p.side==="long"?"short":"long",sizeUsd:formatDecimal(size),leverage:p.leverage,orderType:"market",reduceOnly:true,status:"filled",fillPrice:p.markPrice,realizedPnl:fmt(netRealized),feeUsd:formatDecimal(fee),createdAt:at,updatedAt:at,closeReason:reason};this.orders.set(o.id,o);if(percent===100n*SCALE) {
       this.positions.delete(symbol);
       if (this.db) {
-        void this.db.savePosition({
+        const pClose = this.db.savePosition({
           market: symbol,
           side: p.side,
           size_usd: "0",
@@ -292,6 +302,7 @@ export class PaperPerpsService {
           is_live: false,
           status: "closed",
         });
+        this.pendingDbWrites.push(pClose);
       }
     }else{const remain=SCALE-fraction;p.sizeUsd=formatDecimal(mul(parseDecimal(p.sizeUsd),remain));p.initialMarginUsd=formatDecimal(mul(parseDecimal(p.initialMarginUsd),remain));p.unrealizedPnl=fmt(mul(signed(p.unrealizedPnl),remain));}this.saveState();return{order:{...o},position:this.positions.get(symbol)?{...this.positions.get(symbol)!}:null,account:this.getAccount()};}
   private market(symbol:string){const m=this.markets.find(x=>x.symbol===symbol.toUpperCase());if(!m)throw new AppError("Unsupported paper perpetual market","MARKET_NOT_FOUND",404);return m;}

@@ -144,6 +144,20 @@ export class CidoDatabaseRepository {
   async savePosition(pos: StoredPosition): Promise<void> {
     if (!this.pool) return;
     try {
+      if (pos.status === "closed") {
+        await this.pool.query(
+          `UPDATE cido_positions SET
+            status = 'closed',
+            size_usd = '0',
+            initial_margin_usd = '0',
+            mark_price = $1,
+            unrealized_pnl = $2,
+            last_updated = NOW()
+          WHERE market = $3 AND status = 'open'`,
+          [pos.mark_price, pos.unrealized_pnl || "0", pos.market]
+        );
+        return;
+      }
       let id = pos.id;
       if (!id) {
         const existing = await this.pool.query<{ id: string }>(
