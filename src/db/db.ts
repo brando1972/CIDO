@@ -106,13 +106,15 @@ export class CidoDatabaseRepository {
         `INSERT INTO cido_orders (
           id, user_id, market, side, size_usd, leverage, order_type, status,
           fill_price, stop_loss_price, take_profit_price, trailing_stop_percent,
-          is_live, close_reason, tx_hash, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
+          is_live, close_reason, tx_hash, realized_pnl, fee_usd, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), NOW())
         ON CONFLICT (id) DO UPDATE SET
           status = EXCLUDED.status,
           fill_price = EXCLUDED.fill_price,
           close_reason = EXCLUDED.close_reason,
           tx_hash = EXCLUDED.tx_hash,
+          realized_pnl = EXCLUDED.realized_pnl,
+          fee_usd = EXCLUDED.fee_usd,
           updated_at = NOW()`,
         [
           order.id,
@@ -130,6 +132,8 @@ export class CidoDatabaseRepository {
           order.is_live,
           order.close_reason || null,
           order.tx_hash || null,
+          order.realized_pnl || null,
+          order.fee_usd || null,
         ]
       );
     } catch (err) {
@@ -218,6 +222,32 @@ export class CidoDatabaseRepository {
     } catch (err) {
       console.error("CidoDatabaseRepository.getRecentOrders error:", err);
       return [];
+    }
+  }
+
+  async saveAccountBalance(balance: string): Promise<void> {
+    if (!this.pool) return;
+    try {
+      await this.pool.query(
+        `INSERT INTO cido_account_state (id, balance, updated_at) VALUES ('default', $1, NOW())
+         ON CONFLICT (id) DO UPDATE SET balance = EXCLUDED.balance, updated_at = NOW()`,
+        [balance]
+      );
+    } catch (err) {
+      console.error("CidoDatabaseRepository.saveAccountBalance error:", err);
+    }
+  }
+
+  async getAccountBalance(): Promise<string | null> {
+    if (!this.pool) return null;
+    try {
+      const res = await this.pool.query<{ balance: string }>(
+        "SELECT balance FROM cido_account_state WHERE id = 'default' LIMIT 1"
+      );
+      return res.rows[0]?.balance ?? null;
+    } catch (err) {
+      console.error("CidoDatabaseRepository.getAccountBalance error:", err);
+      return null;
     }
   }
 }

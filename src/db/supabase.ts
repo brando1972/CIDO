@@ -38,6 +38,8 @@ export interface StoredOrder {
   trailing_stop_percent?: string | null;
   is_live: boolean;
   close_reason?: string | null;
+  realized_pnl?: string | null;
+  fee_usd?: string | null;
   tx_hash?: string | null;
   created_at?: string;
 }
@@ -119,4 +121,30 @@ export class DatabaseRepository {
       return [];
     }
   }
+
+  async saveAccountBalance(balance: string): Promise<void> {
+    if (!this.supabase) return;
+    try {
+      await this.supabase.from("cido_account_state").upsert({ id: "default", balance });
+    } catch (err) {
+      console.error("Supabase saveAccountBalance error:", err);
+    }
+  }
+
+  async getAccountBalance(): Promise<string | null> {
+    if (!this.supabase) return null;
+    try {
+      const { data, error } = await this.supabase
+        .from("cido_account_state")
+        .select("balance")
+        .eq("id", "default")
+        .single();
+      if (error) return null;
+      return (data as { balance: string })?.balance ?? null;
+    } catch (err) {
+      console.error("Supabase getAccountBalance error:", err);
+      return null;
+    }
+  }
 }
+

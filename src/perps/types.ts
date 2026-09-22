@@ -45,6 +45,8 @@ export interface PerpsOrder extends PerpsOrderRequest {
   createdAt: string;
   updatedAt: string;
   closeReason?: PerpsCloseReason;
+  realizedPnl?: string | null;
+  feeUsd?: string | null;
 }
 
 export interface PerpsPosition {
@@ -82,6 +84,7 @@ export interface PerpsAccount {
   availableMargin: string;
   usedMargin: string;
   unrealizedPnl: string;
+  totalPnl?: string;
 }
 
 export interface PerpsSafetyState {

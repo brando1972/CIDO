@@ -62,6 +62,7 @@ export class PaperPerpsService {
   async saveDbState(): Promise<void> {
     if (!this.db) return;
     const promises: Promise<unknown>[] = [];
+    promises.push(this.db.saveAccountBalance(formatDecimal(this.balance)));
     for (const o of this.orders.values()) {
       promises.push(this.db.saveOrder({
         id: o.id,
@@ -77,6 +78,8 @@ export class PaperPerpsService {
         trailing_stop_percent: o.trailingStopPercent ?? null,
         is_live: false,
         close_reason: o.closeReason ?? null,
+        realized_pnl: o.realizedPnl ?? null,
+        fee_usd: o.feeUsd ?? null,
         created_at: o.createdAt,
       }));
     }
@@ -117,6 +120,10 @@ export class PaperPerpsService {
   async hydrateFromDb(): Promise<void> {
     if (!this.db) return;
     try {
+      const savedBalance = await this.db.getAccountBalance();
+      if (savedBalance) {
+        this.balance = parseDecimal(savedBalance);
+      }
       const openPositions = await this.db.getOpenPositions();
       for (const p of openPositions) {
         this.positions.set(p.market, {
@@ -152,6 +159,8 @@ export class PaperPerpsService {
           ...(o.take_profit_price ? { takeProfitPrice: o.take_profit_price } : {}),
           ...(o.trailing_stop_percent ? { trailingStopPercent: o.trailing_stop_percent } : {}),
           closeReason: (o.close_reason as any) ?? null,
+          realizedPnl: o.realized_pnl ?? null,
+          feeUsd: o.fee_usd ?? null,
           createdAt: o.created_at ?? new Date(this.now()).toISOString(),
           updatedAt: o.created_at ?? new Date(this.now()).toISOString(),
         });
@@ -184,7 +193,26 @@ export class PaperPerpsService {
   listMarkets() { return this.markets.map(m => ({ ...m })); }
   listOrders() { return [...this.orders.values()].map(o => ({ ...o })); }
   listPositions() { return [...this.positions.values()].map(p => ({ ...p })); }
-  getAccount(): PerpsAccount { let used=0n,pnl=0n; for(const p of this.positions.values()){used+=parseDecimal(p.initialMarginUsd);pnl+=signed(p.unrealizedPnl);} const equity=this.balance+pnl; return {mode:"paper",currency:"USD",balance:formatDecimal(this.balance),equity:fmt(equity),availableMargin:fmt(equity-used),usedMargin:formatDecimal(used),unrealizedPnl:fmt(pnl)}; }
+  getAccount(): PerpsAccount {
+    let used=0n,pnl=0n;
+    for(const p of this.positions.values()){
+      used+=parseDecimal(p.initialMarginUsd);
+      pnl+=signed(p.unrealizedPnl);
+    }
+    const equity=this.balance+pnl;
+    const initialBalance = parseDecimal(this.config.PERPS_INITIAL_BALANCE_USD);
+    const totalPnl = fmt(equity - initialBalance);
+    return {
+      mode:"paper",
+      currency:"USD",
+      balance:formatDecimal(this.balance),
+      equity:fmt(equity),
+      availableMargin:fmt(equity-used),
+      usedMargin:formatDecimal(used),
+      unrealizedPnl:fmt(pnl),
+      totalPnl
+    };
+  }
 
   preview(input: PerpsOrderRequest): PerpsPreview {
     if (this.safety.killSwitchEnabled) throw new AppError("Perpetuals kill switch is enabled", "PERPS_KILL_SWITCH", 423);
@@ -247,8 +275,8 @@ export class PaperPerpsService {
   emergencyCloseAll(reason="operator emergency close") { this.setKillSwitch(true, reason); const results=[]; for(const symbol of [...this.positions.keys()])results.push(this.closePosition(symbol,"100","manual",this.now())); for(const order of this.orders.values()){if(order.status==="open"){order.status="cancelled";order.updatedAt=new Date(this.now()).toISOString();}} this.saveState(); return { safety:this.getSafetyState(), closedPositions:results.length, account:this.getAccount() }; }
 
   private processMarket(m:PerpsMarket,ts:number){if(!this.positions.has(m.symbol)){const o=[...this.orders.values()].filter(x=>x.market===m.symbol&&x.status==="open").sort((a,b)=>a.createdAt.localeCompare(b.createdAt)).find(x=>crossed(x,m.referencePrice));if(o){o.status="filled";o.fillPrice=o.limitPrice!;o.updatedAt=new Date(ts).toISOString();this.open(o,o.fillPrice,ts);this.saveState();}}const p=this.positions.get(m.symbol);if(!p)return;p.markPrice=m.referencePrice;p.lastUpdated=new Date(ts).toISOString();p.unrealizedPnl=pnl(p);const mark=parseDecimal(p.markPrice);ratchetTrailingStop(p,mark);const reason:PerpsCloseReason=liquidated(p,mark)?"liquidation":trigger(p,mark);if(reason)this.closePosition(p.market,"100",reason,ts);}
-  private open(o:PerpsOrder,fill:string,ts:number){const size=parseDecimal(o.sizeUsd),lev=parseDecimal(o.leverage),margin=div(size,lev),fee=mul(size,FEE_RATE),move=div(SCALE,lev)-MAINTENANCE_RATE,entry=parseDecimal(fill),liq=o.side==="long"?mul(entry,SCALE-move):mul(entry,SCALE+move),at=new Date(ts).toISOString();this.balance-=fee;const p:PerpsPosition={market:o.market,side:o.side,sizeUsd:formatDecimal(size),leverage:o.leverage,entryPrice:fill,markPrice:this.market(o.market).referencePrice,initialMarginUsd:formatDecimal(margin),unrealizedPnl:"0",liquidationPrice:formatDecimal(liq<0n?0n:liq),takeProfitPrice:o.takeProfitPrice,stopLossPrice:o.stopLossPrice,trailingStopPercent:o.trailingStopPercent,openedAt:at,lastUpdated:at};if(o.trailingStopPercent){p.trailingWatermarkPrice=fill;p.trailingTriggerPrice=trailingTriggerPrice(p,parseDecimal(fill));}p.unrealizedPnl=pnl(p);this.positions.set(p.market,p);this.saveState();return p;}
-  private closePosition(symbol:string,percentage:string,reason:Exclude<PerpsCloseReason,null>,ts:number){const p=this.positions.get(symbol);if(!p)throw new AppError("Paper position not found","POSITION_NOT_FOUND",404);const percent=parseDecimal(percentage);if(percent<=0n||percent>100n*SCALE)throw new AppError("percentage must be greater than 0 and no more than 100","INVALID_PERCENTAGE",400);const fraction=div(percent,100n*SCALE),size=mul(parseDecimal(p.sizeUsd),fraction),fee=mul(size,FEE_RATE),realized=mul(signed(p.unrealizedPnl),fraction);this.balance+=realized-fee;const at=new Date(ts).toISOString(),o:PerpsOrder={id:randomUUID(),market:symbol,side:p.side==="long"?"short":"long",sizeUsd:formatDecimal(size),leverage:p.leverage,orderType:"market",reduceOnly:true,status:"filled",fillPrice:p.markPrice,createdAt:at,updatedAt:at,closeReason:reason};this.orders.set(o.id,o);if(percent===100n*SCALE) {
+  private open(o:PerpsOrder,fill:string,ts:number){const size=parseDecimal(o.sizeUsd),lev=parseDecimal(o.leverage),margin=div(size,lev),fee=mul(size,FEE_RATE),move=div(SCALE,lev)-MAINTENANCE_RATE,entry=parseDecimal(fill),liq=o.side==="long"?mul(entry,SCALE-move):mul(entry,SCALE+move),at=new Date(ts).toISOString();this.balance-=fee;o.feeUsd=formatDecimal(fee);const p:PerpsPosition={market:o.market,side:o.side,sizeUsd:formatDecimal(size),leverage:o.leverage,entryPrice:fill,markPrice:this.market(o.market).referencePrice,initialMarginUsd:formatDecimal(margin),unrealizedPnl:"0",liquidationPrice:formatDecimal(liq<0n?0n:liq),takeProfitPrice:o.takeProfitPrice,stopLossPrice:o.stopLossPrice,trailingStopPercent:o.trailingStopPercent,openedAt:at,lastUpdated:at};if(o.trailingStopPercent){p.trailingWatermarkPrice=fill;p.trailingTriggerPrice=trailingTriggerPrice(p,parseDecimal(fill));}p.unrealizedPnl=pnl(p);this.positions.set(p.market,p);this.saveState();return p;}
+  private closePosition(symbol:string,percentage:string,reason:Exclude<PerpsCloseReason,null>,ts:number){const p=this.positions.get(symbol);if(!p)throw new AppError("Paper position not found","POSITION_NOT_FOUND",404);const percent=parseDecimal(percentage);if(percent<=0n||percent>100n*SCALE)throw new AppError("percentage must be greater than 0 and no more than 100","INVALID_PERCENTAGE",400);const fraction=div(percent,100n*SCALE),size=mul(parseDecimal(p.sizeUsd),fraction),fee=mul(size,FEE_RATE),realized=mul(signed(p.unrealizedPnl),fraction);const netRealized=realized-fee;this.balance+=netRealized;const at=new Date(ts).toISOString(),o:PerpsOrder={id:randomUUID(),market:symbol,side:p.side==="long"?"short":"long",sizeUsd:formatDecimal(size),leverage:p.leverage,orderType:"market",reduceOnly:true,status:"filled",fillPrice:p.markPrice,realizedPnl:fmt(netRealized),feeUsd:formatDecimal(fee),createdAt:at,updatedAt:at,closeReason:reason};this.orders.set(o.id,o);if(percent===100n*SCALE) {
       this.positions.delete(symbol);
       if (this.db) {
         void this.db.savePosition({
